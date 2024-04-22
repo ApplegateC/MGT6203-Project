@@ -1,0 +1,520 @@
+---
+title: "Group 114 Project"
+output: html_document
+date: "2024-04-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+#Install and Import necessary packages
+packages <- c("tidyverse", "randomForest", "dplyr", "fastDummies", "caret", "kernlab", "xgboost")  
+
+#Install packages if they arent already installed
+for (pkg in packages) {
+  if (!require(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+}
+
+#load the packages
+library(tidyverse)
+library(randomForest)
+library(dplyr)
+library(fastDummies)
+library(caret)
+library(kernlab)
+library(xgboost)
+```
+
+Importing the Dataset:
+
+```{r pressure, echo=FALSE}
+data <- read.csv('Train.csv')
+data
+```
+Here the missing counts by column are plotted. Two types of missing data with our dataset- NAs and blank values. We show both in the plot.
+```{r}
+missing_counts <- colSums(is.na(data) | data == "")
+
+
+par(mar = c(8, 5, 5, 3))
+# Create a bar plot
+barplot(missing_counts,
+        main = "Number of Missing/Blank Entries in Each Column",
+        xlab = "",
+        ylab = "Number of Missing/Blank Entries",
+        col = "skyblue",
+        ylim = c(0, max(missing_counts) + 1),
+        names.arg = names(missing_counts),
+        cex.names = 0.8,
+        las = 2  # Rotate x-axis labels vertically
+)
+```
+Here, blank or missing values are dropped for the following columns: Var_1, Graduated, Ever_Married and Profession. The new number of rows is shown.
+```{r}
+# Drop rows with NA or blank values in the specified column
+data <- subset(data, !is.na(data[["Var_1"]]) & data[["Var_1"]] != "")
+data <- subset(data, !is.na(data[["Graduated"]]) & data[["Graduated"]] != "")
+data <- subset(data, !is.na(data[["Ever_Married"]]) & data[["Ever_Married"]] != "")
+data <- subset(data, !is.na(data[["Profession"]]) & data[["Profession"]] != "")
+# Print the filtered data frame
+nrow(data)
+```
+
+Work_Experience and Family_Size has and NA or blank values imputed with the median.
+```{r}
+data$Work_Experience <- ifelse(is.na(data$Work_Experience), median(data$Work_Experience, na.rm = TRUE), data$Work_Experience)
+data$Family_Size <- ifelse(is.na(data$Family_Size), median(data$Family_Size, na.rm = TRUE), data$Family_Size)
+```
+
+In the next chunk, we verify that there are no more NAs or blank values for any column.
+```{r}
+# Calculate the number of missing/blank entries in each column
+missing_counts <- colSums(is.na(data) | data == "")
+
+print(missing_counts)
+```
+feature creation occurs in the next chunk. Binned variables are made.
+```{r}
+### Create binned variables for Work_Experience, Family_size and Age
+#Work Experience Binning
+WE_breaks <- c(-1, 2, 6, 99)
+
+# Create a new column based on binning of the 'Work Experience' column
+data$WE_Group <- cut(data$Work_Experience, breaks = WE_breaks, labels = c("No Experience", "Some Experience", "Experienced"))
+
+#Family Size Binning
+FS_breaks <- c(0, 4, 6, 99)
+
+# Create a new column based on binning of the 'Family_Size' column
+data$FS_Group <- cut(data$Family_Size, breaks = FS_breaks, labels = c("Small_Size", "Medium_SIze", "Large_Size"))
+
+#Age Binning
+age_breaks <- c(0, 30, 55, 99)
+
+# Create a new column based on binning of the 'Age' column
+data$Age_Group <- cut(data$Age, breaks = age_breaks, labels = c("Young Adult", "Adult", "Elderly"))
+```
+
+In this chunk, binned variables are dropped. Categorical variables are One-Hot-Encoded and the same columns are dropped.
+```{r}
+#Drop columns
+columns_to_drop <- c("Work_Experience", "Family_Size", "Age", "ID")
+data <- data[, -which(names(data) %in% columns_to_drop)]
+
+#One Hot Encode the remaining variables
+columns_to_encode <- c("Gender", "Ever_Married", "Graduated", "Profession", "Var_1", "FS_Group", "Age_Group", "WE_Group", "Spending_Score")
+
+encoded_data <- dummy_cols(data, select_columns = columns_to_encode)
+
+#Drop the one hot encoded columns
+one_hot_to_drop <- c("Gender", "Ever_Married", "Graduated", "Profession", "Var_1", "FS_Group", "Age_Group", "WE_Group", "Spending_Score")
+encoded_data <- encoded_data[, -which(names(encoded_data) %in% one_hot_to_drop)]
+```
+
+```{r}
+head(encoded_data)
+```
+70/30 Split for training and test data is created.
+```{r}
+set.seed(123)
+
+# Define the index for splitting keeping the percentages of each segmentation constant
+train_index <- createDataPartition(data$Segmentation, p = 0.7, list = FALSE, times = 1)
+
+# Split the data into training and testing sets
+train_X <- encoded_data[train_index, -which(names(encoded_data) == "Segmentation")]
+test_X <- encoded_data[-train_index, -which(names(encoded_data) == "Segmentation")]
+train_y <- encoded_data$Segmentation[train_index]
+test_y <- encoded_data$Segmentation[-train_index]
+
+print(dim(train_X))
+print(dim(test_X))
+print(length(train_y))
+print(length(test_y))
+```
+Linear-SVM is fit in the next chunk.
+```{r}
+#Creating the Linear-SVM Model
+#SVM needs the data in one table, here the train sets are merged column to column
+train <- cbind(train_X, train_y)
+
+#cross validation config
+train_control = trainControl(method = "repeatedcv", number=5, repeats=5)
+
+#fit the Linear-SVM with some data normalization occurring also.
+svm_model = train(train_y~., data = train, method = "svmLinear", trControl = train_control, tuneLength = 5, preProcess = c("center","scale"))
+
+pred_y = predict(svm_model, test_X)
+
+pred_y = as.factor(pred_y)
+test_y = as.factor(test_y)
+
+#Creating the confusion matrix
+conf_matrix <- confusionMatrix(data = pred_y, test_y)
+cm <- conf_matrix$table
+lin_accuracy <- sum(diag(cm)) / sum(cm)
+
+print(paste("Accuracy for Linear-SVM:", lin_accuracy))
+```
+Radial SVM is fit in the next chunk.
+```{r}
+#Creating the Radial-SVM Model
+train <- cbind(train_X, train_y)
+
+#cross validation config
+train_control = trainControl(method = "repeatedcv", number=5, repeats=5)
+
+#fit the Radial-SVM with some data normalization occurring also.
+svm_model = train(train_y~., data = train, method = "svmRadial", trControl = train_control, tuneLength = 5, preProcess = c("center","scale"))
+
+pred_y = predict(svm_model, test_X)
+
+pred_y = as.factor(pred_y)
+test_y = as.factor(test_y)
+
+#Creating the confusion matrix
+conf_matrix <- confusionMatrix(data = pred_y, test_y)
+cm <- conf_matrix$table
+Rad_accuracy <- sum(diag(cm)) / sum(cm)
+
+print(paste("Accuracy for Radial-SVM:", Rad_accuracy))
+```
+Decision tree is fit in the next chunk.
+```{r}
+#Factorizing the response variable
+train_y_fact <- factor(train_y, levels = c("A", "B", "C", "D"))
+
+#Create hyperparameter grid
+tuning.grid <- expand.grid(
+  maxdepth = c(3, 8, 15),
+  minsplit = c(2, 5, 15),
+  minbucket = c(2,4,8),
+  accuracy = NA
+)
+
+#Cross validation config
+train_control_dt = trainControl(method = "cv", number=5)
+
+#Manually creating a grid searching algorithm
+for(i in seq_len(nrow(tuning.grid))) {
+  
+  #Fit a model for each hyperparameter combination
+  fit <- train(
+    x = train_X,
+    y = train_y_fact,
+    method = "treebag",
+    trControl = train_control_dt,
+    maxdepth = tuning.grid$maxdepth[i],
+    minsplit = tuning.grid$minsplit[i],
+    minbucket = tuning.grid$minbucket[i]
+  )
+  
+  #Save accuracy from each model
+  if (!is.null(fit$results)) {
+    tuning.grid$accuracy[i] <- fit$results$Accuracy
+  } else {
+    # If fit$results is empty, assign NA to accuracy and kappa
+    tuning.grid$accuracy[i] <- NA
+  }
+}
+
+#Look at top performing model to see the optimal hyperparameters
+tuning.grid %>%
+  arrange(-accuracy) %>%
+  head(1)
+```
+Decision tree is created with the optimal hyperparameters and the test data is input.
+```{r}
+#Optimal Decision Tree Model
+final_dt <- train(
+    x = train_X,
+    y = train_y_fact,
+    method = "treebag",
+    trControl = train_control_dt,
+    maxdepth = 8,
+    minsplit = 15,
+    minbucket = 8
+  )
+
+pred_y = predict(final_dt, test_X)
+
+pred_y = as.factor(pred_y)
+test_y = as.factor(test_y)
+
+conf_matrix <- confusionMatrix(data = pred_y, test_y)
+cm <- conf_matrix$table
+Rad_accuracy <- sum(diag(cm)) / sum(cm)
+
+print(paste("Accuracy for Decision Tree:", Rad_accuracy))
+```
+
+```{r}
+#cross-validation config
+train_control_xg <- trainControl(
+  method = "cv",
+  number = 5,
+  verboseIter = TRUE,
+  allowParallel = TRUE
+)
+
+#Define the hyperparameter grid for tuning
+hyperparameters_xg <- expand.grid(
+  nrounds = c(50, 100),
+  max_depth = c(3, 6),
+  eta = c(0.01, 0.1),
+  gamma = c(0, 0.2),
+  colsample_bytree = c(0.5, 0.8),
+  min_child_weight = c(5, 10),
+  subsample = c(0.8, 1)
+)
+
+#Train the XGBoost model
+xgb_model <- train(
+  x = train_X,
+  y = train_y_fact,
+  method = "xgbTree",
+  trControl = train_control_xg,
+  tuneGrid = hyperparameters_xg,
+  metric = "Accuracy",
+  verbose = TRUE
+)
+
+#Print the best hyperparameters
+print(xgb_model$bestTune)
+
+#Print the best model
+print(xgb_model$finalModel)
+
+#Input test data
+predictions <- predict(xgb_model, newdata = test_X)
+
+#See accuracy
+performance <- postResample(pred = predictions, obs = test_y)
+print(performance)
+```
+
+After building the Preliminary Models, here are the accuracies of them:
+Linear-SVM: 50.9%
+Radial-SVM: 53.2%
+Decision Tree: 50.8%
+XGBoost:53.4%
+
+We will tune the XGBoost one more time to try and improve that model further. Then the model will be finalized.
+
+```{r}
+#cross-validation config
+train_control_xg <- trainControl(
+  method = "cv",               # Cross-validation method
+  number = 5,                   # Number of folds
+  verboseIter = TRUE,          # Show progress
+  allowParallel = TRUE         # Allow parallel computation
+)
+
+#Define the hyperparameter grid for tuning
+hyperparameters_xg_fin <- expand.grid(
+  nrounds = c(100, 115, 125),
+  max_depth = c(5, 6),
+  eta = c(0.01),
+  gamma = c(0.1),
+  colsample_bytree = c(0.5, 0.6),
+  min_child_weight = c(5),
+  subsample = c(1)
+)
+
+#Train the XGBoost model
+xgb_model <- train(
+  x = train_X,
+  y = train_y_fact,
+  method = "xgbTree",           # Specify XGBoost method
+  trControl = train_control_xg,    # Training control settings
+  tuneGrid = hyperparameters_xg_fin,   # Hyperparameter grid
+  metric = "Accuracy",              # Evaluation metric
+  verbose = TRUE                # Show progress
+)
+
+#Print the best hyperparameters
+print(xgb_model$bestTune)
+
+#Print the best model
+print(xgb_model$finalModel)
+
+#Make predictions on test data
+predictions <- predict(xgb_model, newdata = test_X)
+
+#See accuracy
+performance <- postResample(pred = predictions, obs = test_y)
+print(performance)
+```
+
+This model is worse than the prior XGBoost Model so we will go with the hyperparameters used in the preliminary model.
+```{r}
+hyperparameters_xg_fin <- expand.grid(
+  nrounds = c(100),
+  max_depth = c(6),
+  eta = c(0.1),
+  gamma = c(0),
+  colsample_bytree = c(0.5),
+  min_child_weight = c(5),
+  subsample = c(1)
+)
+
+xgb_model_final <- train(
+  x = train_X,
+  y = train_y_fact,
+  method = "xgbTree",
+  trControl = train_control_xg,
+  tuneGrid = hyperparameters_xg_fin,
+  metric = "Accuracy",
+  verbose = TRUE
+)
+
+#turn the model into XGB type
+xgb_model <- xgb_model_final$finalModel
+
+#feature importance
+xgb.importance(model = xgb_model)
+```
+```{r}
+#Input test data
+pred_y_xg <- predict(xgb_model_final, newdata = as.matrix(test_X))
+
+#Create confusion matrix
+cm <- confusionMatrix(data = pred_y_xg, reference = as.factor(test_y))
+
+print(cm)
+```
+Now that the final model is created. The test set from Kaggle is uploaded. And the same preparation steps are undertaken
+```{r}
+t_data <- read.csv('Test.csv')
+t_data
+```
+```{r}
+missing_counts <- colSums(is.na(t_data) | t_data == "")
+
+
+par(mar = c(8, 5, 5, 3))
+# Create a bar plot
+barplot(missing_counts,
+        main = "Number of Missing/Blank Entries in Each Column",
+        xlab = "",
+        ylab = "Number of Missing/Blank Entries",
+        col = "skyblue",
+        ylim = c(0, max(missing_counts) + 1),
+        names.arg = names(missing_counts),
+        cex.names = 0.8,
+        las = 2  # Rotate x-axis labels vertically
+)
+```
+
+```{r}
+#Impute with median
+t_data$Work_Experience <- ifelse(is.na(t_data$Work_Experience), median(t_data$Work_Experience, na.rm = TRUE), t_data$Work_Experience)
+t_data$Family_Size <- ifelse(is.na(t_data$Family_Size), median(t_data$Family_Size, na.rm = TRUE), t_data$Family_Size)
+
+#Create a Mode Function
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+
+#Impute with Mode
+t_data$Var_1 <- ifelse(is.na(t_data$Var_1) | t_data$Var_1 == "", Mode(t_data$Var_1), t_data$Var_1)
+t_data$Graduated <- ifelse(is.na(t_data$Graduated) | t_data$Graduated == "", Mode(t_data$Graduated), t_data$Graduated)
+t_data$Ever_Married <- ifelse(is.na(t_data$Ever_Married) | t_data$Ever_Married == "", Mode(t_data$Ever_Married), t_data$Ever_Married)
+t_data$Profession <- ifelse(is.na(t_data$Profession) | t_data$Profession == "", Mode(t_data$Profession), t_data$Profession)
+
+```
+
+Verify no NAs or blank values.
+```{r}
+missing_counts <- colSums(is.na(t_data) | t_data == "")
+print(missing_counts)
+```
+```{r}
+### Create binned variables for Work_Experience, Family_size and Age
+
+#Work Experience Binning
+WE_breaks <- c(-1, 2, 6, 99)
+
+# Create a new column based on binning of the 'Work Experience' column
+t_data$WE_Group <- cut(t_data$Work_Experience, breaks = WE_breaks, labels = c("No Experience", "Some Experience", "Experienced"))
+
+#Family Size Binning
+FS_breaks <- c(0, 4, 6, 99)
+
+# Create a new column based on binning of the 'Family_Size' column
+t_data$FS_Group <- cut(t_data$Family_Size, breaks = FS_breaks, labels = c("Small_Size", "Medium_SIze", "Large_Size"))
+
+#Age Binning
+age_breaks <- c(0, 30, 55, 99)
+
+# Create a new column based on binning of the 'Age' column
+t_data$Age_Group <- cut(t_data$Age, breaks = age_breaks, labels = c("Young Adult", "Adult", "Elderly"))
+```
+
+Drop some columns and retain the ID column in a vector.
+```{r}
+#Segment ID
+col_ID <- t_data$ID
+
+#Drop columns
+columns_to_drop <- c("Work_Experience", "Family_Size", "Age", "ID")
+t_data <- t_data[, -which(names(t_data) %in% columns_to_drop)]
+
+#One Hot Encode the remaining variables
+columns_to_encode <- c("Gender", "Ever_Married", "Graduated", "Profession", "Var_1", "FS_Group", "Age_Group", "WE_Group", "Spending_Score")
+
+encoded_t_data <- dummy_cols(t_data, select_columns = columns_to_encode)
+
+#Drop the one hot encoded columns
+one_hot_to_drop <- c("Gender", "Ever_Married", "Graduated", "Profession", "Var_1", "FS_Group", "Age_Group", "WE_Group", "Spending_Score")
+encoded_t_data <- encoded_t_data[, -which(names(encoded_t_data) %in% one_hot_to_drop)]
+```
+
+```{r}
+head(encoded_t_data)
+```
+
+Predict the classes on the Kaggle test data.
+```{r}
+output <- predict(xgb_model_final, encoded_t_data)
+len(output)
+```
+
+Combine the predictions and IDs into one data.frame
+```{r}
+final_df <- data.frame(ID = col_ID, Segmentation = output)
+
+# Print the merged data frame
+print(final_df)
+```
+
+Export predictions in a csv file.
+```{r}
+write.csv(final_df, file = "submission.csv", row.names = FALSE)
+```
+
+See feature importance in the model
+```{r}
+importance1 <- importance[order(importance$Gain), ]
+
+# Select only the top 10 features
+top_10_importance <- tail(importance1, 10)
+
+par(mar = c(5, 15, 4, 2))
+
+# Plot bar plot with top 10 importance scores and variable names
+barplot(top_10_importance$Gain, names.arg = top_10_importance$Feature, horiz = TRUE,
+        main = "Top 10 Feature Importance", xlab = "Gain", las = 1)
+```
+
